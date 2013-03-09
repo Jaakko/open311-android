@@ -5,6 +5,7 @@
  */
 package gov.in.bloomington.georeporter.models;
 
+import gov.in.bloomington.georeporter.util.EasySSLSocketFactory;
 import gov.in.bloomington.georeporter.util.Open311Parser;
 import gov.in.bloomington.georeporter.R;
 import gov.in.bloomington.georeporter.util.Media;
@@ -22,29 +23,34 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 
-import org.apache.http.HttpResponse;
-import org.apache.http.HttpStatus;
-import org.apache.http.HttpVersion;
-import org.apache.http.NameValuePair;
-import org.apache.http.client.ClientProtocolException;
-import org.apache.http.client.entity.UrlEncodedFormEntity;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.entity.mime.MultipartEntity;
-import org.apache.http.entity.mime.content.ByteArrayBody;
-import org.apache.http.entity.mime.content.StringBody;
-import org.apache.http.impl.client.DefaultHttpClient;
-import org.apache.http.message.BasicNameValuePair;
-import org.apache.http.params.CoreConnectionPNames;
-import org.apache.http.params.CoreProtocolPNames;
-import org.apache.http.util.EntityUtils;
+import ch.boye.httpclientandroidlib.HttpResponse;
+import ch.boye.httpclientandroidlib.HttpStatus;
+import ch.boye.httpclientandroidlib.HttpVersion;
+import ch.boye.httpclientandroidlib.NameValuePair;
+import ch.boye.httpclientandroidlib.client.ClientProtocolException;
+import ch.boye.httpclientandroidlib.client.entity.UrlEncodedFormEntity;
+import ch.boye.httpclientandroidlib.client.methods.HttpGet;
+import ch.boye.httpclientandroidlib.client.methods.HttpPost;
+import ch.boye.httpclientandroidlib.conn.scheme.PlainSocketFactory;
+import ch.boye.httpclientandroidlib.conn.scheme.Scheme;
+import ch.boye.httpclientandroidlib.entity.mime.MultipartEntity;
+import ch.boye.httpclientandroidlib.entity.mime.content.ByteArrayBody;
+import ch.boye.httpclientandroidlib.entity.mime.content.StringBody;
+import ch.boye.httpclientandroidlib.impl.client.DefaultHttpClient;
+import ch.boye.httpclientandroidlib.message.BasicNameValuePair;
+import ch.boye.httpclientandroidlib.params.CoreConnectionPNames;
+import ch.boye.httpclientandroidlib.params.CoreProtocolPNames;
+import ch.boye.httpclientandroidlib.util.EntityUtils;
 import gov.in.bloomington.georeporter.util.json.JSONArray;
 import gov.in.bloomington.georeporter.util.json.JSONException;
 import gov.in.bloomington.georeporter.util.json.JSONObject;
 
 import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager.NameNotFoundException;
 import android.graphics.Bitmap;
 import android.graphics.Bitmap.CompressFormat;
+import android.os.Build;
 import android.util.Log;
 
 public class Open311 {
@@ -98,6 +104,7 @@ public class Open311 {
 	public static final String NUMBER       = "number";
 	public static final String DATETIME     = "datetime";
 	public static final String TEXT         = "text";
+	public static final String TRUE         = "true";
 	public static final String SINGLEVALUELIST = "singlevaluelist";
 	public static final String MULTIVALUELIST  = "multivaluelist";
 	// Key names from /res/raw/available_servers.json
@@ -113,7 +120,7 @@ public class Open311 {
 
 	
 	
-	public static final String DATETIME_FORMAT = "yyyy-MM-dd'T'hh:mm:ssz";
+	public static final String DATETIME_FORMAT = "yyyy-MM-dd'T'HH:mm:ssZ";
 	
     public static JSONObject                  sEndpoint;
 	public static Boolean                     sReady = false;
@@ -145,11 +152,27 @@ public class Open311 {
 	 * @return
 	 * DefaultHttpClient
 	 */
-	public static DefaultHttpClient getClient() {
+	public static DefaultHttpClient getClient(Context c) {
 		if (mClient == null) {
 			mClient = new DefaultHttpClient();
+			
+			String user_agent;
+			try {
+                PackageInfo info = c.getPackageManager().getPackageInfo(c.getPackageName(), 0);
+                user_agent = String.format("%s/%s (Android/%s)", c.getString(R.string.app_name), info.versionName, Build.VERSION.RELEASE);
+            }
+            catch (NameNotFoundException e) {
+                user_agent = String.format("%s (Android/%s)", c.getString(R.string.app_name), Build.VERSION.RELEASE);
+            }
+			
+			Scheme http  = new Scheme("http",  80,  PlainSocketFactory.getSocketFactory());
+			Scheme https = new Scheme("https", 443, new EasySSLSocketFactory());
+			mClient.getConnectionManager().getSchemeRegistry().register(http);
+			mClient.getConnectionManager().getSchemeRegistry().register(https);
+			
 			mClient.getParams().setParameter(CoreProtocolPNames  .HTTP_CONTENT_CHARSET, "UTF-8");
 			mClient.getParams().setParameter(CoreProtocolPNames  .PROTOCOL_VERSION,     HttpVersion.HTTP_1_1);
+			mClient.getParams().setParameter(CoreProtocolPNames  .USER_AGENT,           user_agent);
 			mClient.getParams().setParameter(CoreConnectionPNames.SO_TIMEOUT,           TIMEOUT);
 			mClient.getParams().setParameter(CoreConnectionPNames.CONNECTION_TIMEOUT,   TIMEOUT);
 		}
@@ -170,7 +193,7 @@ public class Open311 {
 	 * @return
 	 * Boolean
 	 */
-	public static Boolean setEndpoint(JSONObject current_server) {
+	public static Boolean setEndpoint(JSONObject current_server, Context context) {
 		sReady        = false;
 		mBaseUrl      = null;
 		mJurisdiction = null;
@@ -190,22 +213,28 @@ public class Open311 {
 		}
 		try {
 			Open311Parser mParser = new Open311Parser(mFormat);
-			sServiceList = mParser.parseServices(loadStringFromUrl(getServiceListUrl()));
-			if (sServiceList == null) return false; 
+			sServiceList = mParser.parseServices(loadStringFromUrl(getServiceListUrl(), context));
+			if (sServiceList == null) { 
+			    return false;
+			}
+			
 			// Go through all the services and pull out the seperate groups
 			// Also, while we're running through, load any service_definitions
 			String group = "";
 			int len = sServiceList.length();
 			for (int i=0; i<len; i++) {
 				JSONObject s = sServiceList.getJSONObject(i);
-				// Add groups to sGroups
+				// services may have an empty string for the group parameter
 				group = s.optString(GROUP);
-				if (group != "" && !sGroups.contains(group)) { sGroups.add(group); }
+				if (group.equals("")) {
+				    group = context.getString(R.string.uncategorized);
+				}
+				if (!sGroups.contains(group)) { sGroups.add(group); }
 				
 				// Add Service Definitions to mServiceDefinitions
-				if (s.optString(METADATA) == "true") {
+				if (s.optString(METADATA) == TRUE) {
 					String code = s.optString(SERVICE_CODE);
-					JSONObject definition = getServiceDefinition(code);
+					JSONObject definition = getServiceDefinition(code, context);
 					if (definition != null) {
 						sServiceDefinitions.put(code, definition);
 					}
@@ -229,13 +258,16 @@ public class Open311 {
 	 * @return
 	 * ArrayList<JSONObject>
 	 */
-	public static ArrayList<JSONObject> getServices(String group) {
+	public static ArrayList<JSONObject> getServices(String group, Context context) {
 		ArrayList<JSONObject> services = new ArrayList<JSONObject>();
 		int len = sServiceList.length();
 		for (int i=0; i<len; i++) {
 			try {
 				JSONObject s = sServiceList.getJSONObject(i);
-				if (s.optString("group").equals(group)) { services.add(s); }
+				if (group.equals(context.getString(R.string.uncategorized))) {
+				    group = "";
+				}
+				if (s.optString(Open311.GROUP).equals(group)) { services.add(s); }
 			} catch (JSONException e) {
 				// TODO Auto-generated catch block
 				e.printStackTrace();
@@ -248,7 +280,7 @@ public class Open311 {
 	 * @param service_code
 	 * @return JSONObject
 	 */
-	public static JSONObject getServiceDefinition(String service_code) {
+	public static JSONObject getServiceDefinition(String service_code, Context context) {
 
 	    if (sServiceDefinitions.containsKey(service_code)) {
 	        return sServiceDefinitions.get(service_code);
@@ -256,7 +288,7 @@ public class Open311 {
 	    else {
     		try {
     			Open311Parser mParser = new Open311Parser(mFormat);
-    			return mParser.parseServiceDefinition(loadStringFromUrl(getServiceDefinitionUrl(service_code)));
+    			return mParser.parseServiceDefinition(loadStringFromUrl(getServiceDefinitionUrl(service_code), context));
     		}
     		catch (Exception e) {
                 // TODO Auto-generated catch block
@@ -299,7 +331,7 @@ public class Open311 {
 	    else {
 	        request.setEntity(prepareUrlEncodedEntity(sr));
 	    }
-	    HttpResponse r = getClient().execute(request);
+	    HttpResponse r = getClient(context).execute(request);
         String responseString = EntityUtils.toString(r.getEntity());
         
 	    int status = r.getStatusLine().getStatusCode();
@@ -353,10 +385,10 @@ public class Open311 {
         // If we don't have a service_code, we don't have a valid POST
         pairs.add(new BasicNameValuePair(SERVICE_CODE, sr.service.getString(SERVICE_CODE)));
         
-        if (mJurisdiction != null) {
+        if (mJurisdiction.length() > 0) {
             pairs.add(new BasicNameValuePair(JURISDICTION, mJurisdiction));
         }
-        if (mApiKey != null) {
+        if (mApiKey.length() > 0) {
             pairs.add(new BasicNameValuePair(API_KEY, mApiKey));
         }
         
@@ -584,28 +616,38 @@ public class Open311 {
 	 * @return
 	 * String
 	 */
-	public static String loadStringFromUrl(String url)
+	public static String loadStringFromUrl(String url, Context c)
 			throws ClientProtocolException, IOException, IllegalStateException {
-		HttpResponse r = getClient().execute(new HttpGet(url));
+		HttpResponse r = getClient(c).execute(new HttpGet(url));
 		String response = EntityUtils.toString(r.getEntity());
 		
 		return response;
 	}
 
 	/**
-	 * @return
-	 * String
+	 * http://endpoint/services.format?jurisdiction_id=jurisdiction
+	 * 
+	 * @return String
 	 */
 	private static String getServiceListUrl() {
-		return mBaseUrl + "/services." + mFormat + "?" + JURISDICTION + "=" + mJurisdiction;
+	    String url = mBaseUrl + "/services." + mFormat;
+	    if (mJurisdiction.length() > 0) {
+	        url = url + "?" + JURISDICTION + "=" + mJurisdiction;
+	    }
+		return url;
 	}
 	
 	/**
+	 * http://endpoint/services/service_code.format?jurisdiction_id=jurisdiction
+	 * 
 	 * @param service_code
-	 * @return
-	 * String
+	 * @return String
 	 */
 	private static String getServiceDefinitionUrl(String service_code) {
-		return mBaseUrl + "/services/" + service_code + "." + mFormat + "?" + JURISDICTION + "=" + mJurisdiction;
+	    String url = mBaseUrl + "/services/" + service_code + "." + mFormat;
+	    if (mJurisdiction.length() > 0) {
+	        url = url + "?" + JURISDICTION + "=" + mJurisdiction;
+	    }
+		return url;
 	}
 }
