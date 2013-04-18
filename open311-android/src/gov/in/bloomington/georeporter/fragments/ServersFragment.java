@@ -66,6 +66,11 @@ public class ServersFragment extends SherlockFragment implements OnItemClickList
 	    v.findViewById(R.id.addServerButton).setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View v) {
+                // Remove the previous instance of the dialog from the parent view
+				if (dialogLayout.getParent() != null) {
+					((ViewGroup) dialogLayout.getParent()).removeView(dialogLayout);
+				}
+				
                 final Spinner format = (Spinner) dialogLayout.findViewById(R.id.format);
                 ArrayAdapter<String> adapter = new ArrayAdapter<String>(getActivity(), android.R.layout.simple_spinner_item, FORMAT_CHOICES);
                 adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
